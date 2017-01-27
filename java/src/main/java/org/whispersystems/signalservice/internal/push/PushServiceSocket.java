@@ -8,13 +8,7 @@ package org.whispersystems.signalservice.internal.push;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.squareup.okhttp.MediaType;
-import com.squareup.okhttp.OkHttpClient;
-import com.squareup.okhttp.Request;
-import com.squareup.okhttp.RequestBody;
-import com.squareup.okhttp.Response;
 
-import org.apache.http.conn.ssl.StrictHostnameVerifier;
 import org.whispersystems.libsignal.IdentityKey;
 import org.whispersystems.libsignal.ecc.ECPublicKey;
 import org.whispersystems.libsignal.logging.Log;
@@ -26,9 +20,8 @@ import org.whispersystems.signalservice.api.crypto.AttachmentCipherOutputStream;
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachment.ProgressListener;
 import org.whispersystems.signalservice.api.messages.multidevice.DeviceInfo;
 import org.whispersystems.signalservice.api.push.ContactTokenDetails;
-import org.whispersystems.signalservice.api.push.SignedPreKeyEntity;
 import org.whispersystems.signalservice.api.push.SignalServiceAddress;
-import org.whispersystems.signalservice.api.push.TrustStore;
+import org.whispersystems.signalservice.api.push.SignedPreKeyEntity;
 import org.whispersystems.signalservice.api.push.exceptions.AuthorizationFailedException;
 import org.whispersystems.signalservice.api.push.exceptions.ExpectationFailedException;
 import org.whispersystems.signalservice.api.push.exceptions.NonSuccessfulResponseCodeException;
@@ -54,6 +47,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
@@ -61,6 +56,16 @@ import java.util.Set;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import okhttp3.ConnectionSpec;
+import okhttp3.Interceptor;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 /**
  * @author Moxie Marlinspike
@@ -93,17 +98,24 @@ public class PushServiceSocket {
   private static final String RECEIPT_PATH              = "/v1/receipt/%s/%d";
   private static final String ATTACHMENT_PATH           = "/v1/attachments/%s";
 
-  private final String              serviceUrl;
-  private final TrustManager[]      trustManagers;
-  private final CredentialsProvider credentialsProvider;
-  private final String              userAgent;
+  private final SignalConnectionInformation[] signalConnectionInformation;
+  private final CredentialsProvider           credentialsProvider;
+  private final String                        userAgent;
+  private final SecureRandom                  random;
 
-  public PushServiceSocket(String serviceUrl, TrustStore trustStore, CredentialsProvider credentialsProvider, String userAgent)
-  {
-    this.serviceUrl          = serviceUrl;
-    this.credentialsProvider = credentialsProvider;
-    this.trustManagers       = BlacklistingTrustManager.createFor(trustStore);
-    this.userAgent           = userAgent;
+  public PushServiceSocket(SignalServiceUrl[] serviceUrls, CredentialsProvider credentialsProvider, String userAgent) {
+    try {
+      this.credentialsProvider         = credentialsProvider;
+      this.userAgent                   = userAgent;
+      this.signalConnectionInformation = new SignalConnectionInformation[serviceUrls.length];
+      this.random                      = SecureRandom.getInstance("SHA1PRNG");
+
+      for (int i = 0; i < serviceUrls.length; i++) {
+        signalConnectionInformation[i] = new SignalConnectionInformation(serviceUrls[i]);
+      }
+    } catch (NoSuchAlgorithmException e) {
+      throw new AssertionError(e);
+    }
   }
 
   public void createAccount(boolean voice) throws IOException {
@@ -556,18 +568,22 @@ public class PushServiceSocket {
       throws PushNetworkException
   {
     try {
-      Log.w(TAG, "Push service URL: " + serviceUrl);
-      Log.w(TAG, "Opening URL: " + String.format("%s%s", serviceUrl, urlFragment));
+      SignalConnectionInformation connectionInformation = getRandom(signalConnectionInformation, random);
+      String                      url                   = connectionInformation.getUrl();
+      Optional<String>            hostHeader            = connectionInformation.getHostHeader();
+      TrustManager[]              trustManagers         = connectionInformation.getTrustManagers();
+
+      Log.w(TAG, "Push service URL: " + url);
+      Log.w(TAG, "Opening URL: " + String.format("%s%s", url, urlFragment));
 
       SSLContext context = SSLContext.getInstance("TLS");
       context.init(null, trustManagers, null);
 
-      OkHttpClient okHttpClient = new OkHttpClient();
-      okHttpClient.setSslSocketFactory(context.getSocketFactory());
-      okHttpClient.setHostnameVerifier(new StrictHostnameVerifier());
+      OkHttpClient.Builder okHttpClientBuilder = new OkHttpClient.Builder()
+          .sslSocketFactory(context.getSocketFactory(), (X509TrustManager)trustManagers[0]);
 
       Request.Builder request = new Request.Builder();
-      request.url(String.format("%s%s", serviceUrl, urlFragment));
+      request.url(String.format("%s%s", url, urlFragment));
 
       if (body != null) {
         request.method(method, RequestBody.create(MediaType.parse("application/json"), body));
@@ -583,7 +599,18 @@ public class PushServiceSocket {
         request.addHeader("X-Signal-Agent", userAgent);
       }
 
-      return okHttpClient.newCall(request.build()).execute();
+      if (connectionInformation.getConnectionSpec().isPresent()) {
+        okHttpClientBuilder.connectionSpecs(Collections.singletonList(connectionInformation.getConnectionSpec().get()));
+      } else {
+        okHttpClientBuilder.connectionSpecs(Util.immutableList(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS));
+      }
+
+      if (hostHeader.isPresent()) {
+        okHttpClientBuilder.protocols(Collections.singletonList(Protocol.HTTP_1_1));
+        request.addHeader("Host", hostHeader.get());
+      }
+
+      return okHttpClientBuilder.build().newCall(request.build()).execute();
     } catch (IOException e) {
       throw new PushNetworkException(e);
     } catch (NoSuchAlgorithmException | KeyManagementException e) {
@@ -597,6 +624,12 @@ public class PushServiceSocket {
     } catch (UnsupportedEncodingException e) {
       throw new AssertionError(e);
     }
+  }
+
+  private SignalConnectionInformation getRandom(SignalConnectionInformation[] connections,
+                                                SecureRandom random)
+  {
+    return connections[random.nextInt(connections.length)];
   }
 
   private static class GcmRegistrationId {
@@ -628,6 +661,37 @@ public class PushServiceSocket {
 
     public String getLocation() {
       return location;
+    }
+  }
+
+  private static class SignalConnectionInformation {
+
+    private final String                   url;
+    private final Optional<String>         hostHeader;
+    private final Optional<ConnectionSpec> connectionSpec;
+    private final TrustManager[]           trustManagers;
+
+    private SignalConnectionInformation(SignalServiceUrl signalServiceUrl) {
+      this.url            = signalServiceUrl.getUrl();
+      this.hostHeader     = signalServiceUrl.getHostHeader();
+      this.connectionSpec = signalServiceUrl.getConnectionSpec();
+      this.trustManagers  = BlacklistingTrustManager.createFor(signalServiceUrl.getTrustStore());
+    }
+
+    String getUrl() {
+      return url;
+    }
+
+    Optional<String> getHostHeader() {
+      return hostHeader;
+    }
+
+    TrustManager[] getTrustManagers() {
+      return trustManagers;
+    }
+
+    Optional<ConnectionSpec> getConnectionSpec() {
+      return connectionSpec;
     }
   }
 }

@@ -4,7 +4,7 @@ apply plugin: 'signing'
 
 sourceCompatibility = 1.7
 archivesBaseName    = "signal-service-java"
-version             = "2.1.1"
+version             = "2.4.7"
 group               = "org.whispersystems"
 
 repositories {
@@ -14,14 +14,15 @@ repositories {
 
 dependencies {
     compile 'com.google.protobuf:protobuf-java:2.5.0'
-    compile 'com.googlecode.libphonenumber:libphonenumber:7.1.0'
+    compile 'com.googlecode.libphonenumber:libphonenumber:8.0.0'
     compile 'com.fasterxml.jackson.core:jackson-databind:2.5.0'
 
-    compile "org.whispersystems:signal-protocol-java:2.2.0"
-    compile 'com.squareup.okhttp:okhttp:2.2.0'
+    compile "org.whispersystems:signal-protocol-java:2.4.0"
+    compile 'com.squareup.okhttp3:okhttp:3.5.0'
     compile 'org.apache.httpcomponents:httpclient:4.4'
 
     testCompile 'junit:junit:3.8.2'
+    testCompile 'org.assertj:assertj-core:1.7.1'
 }
 
 tasks.whenTaskAdded { task ->

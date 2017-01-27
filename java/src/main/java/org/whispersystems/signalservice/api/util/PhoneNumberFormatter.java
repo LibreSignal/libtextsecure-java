@@ -27,6 +27,10 @@ public class PhoneNumberFormatter {
 
   public static boolean isValidNumber(String number) {
     return number.matches("^\\+[0-9]{10,}")  ||
+           number.matches("^\\+685[0-9]{5}") ||
+           number.matches("^\\+376[0-9]{6}") ||
+           number.matches("^\\+299[0-9]{6}") ||
+           number.matches("^\\+597[0-9]{6}") ||
            number.matches("^\\+298[0-9]{6}") ||
            number.matches("^\\+240[0-9]{6}") ||
            number.matches("^\\+687[0-9]{6}") ||
@@ -66,6 +70,10 @@ public class PhoneNumberFormatter {
   public static String formatNumber(String number, String localNumber)
       throws InvalidNumberException
   {
+    if (number == null) {
+      throw new InvalidNumberException("Null String passed as number.");
+    }
+
     if (number.contains("@")) {
       throw new InvalidNumberException("Possible attempt to use email address.");
     }
@@ -76,8 +84,8 @@ public class PhoneNumberFormatter {
       throw new InvalidNumberException("No valid characters found.");
     }
 
-    if (number.charAt(0) == '+')
-      return number;
+//    if (number.charAt(0) == '+')
+//      return number;
 
     try {
       PhoneNumberUtil util          = PhoneNumberUtil.getInstance();
